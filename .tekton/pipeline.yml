@@ -1,0 +1,112 @@
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: cd-pipeline
+  namespace: sn-labs-caitlynnphil
+spec:
+  params:
+    - name: app-name
+      type: string
+      default: ci-cd-final-project
+    - name: build-image
+      type: string
+      default: >-
+        image-registry.openshift-image-registry.svc:5000/sn-labs-caitlynnphil/ci-cd-final-project:latest
+  workspaces:
+    - name: output
+      optional: false
+  tasks:
+    - name: cleanup
+      taskRef:
+        kind: Task
+        name: cleanup
+      params: []
+      workspaces:
+        - name: source
+          workspace: output
+
+    - name: git-clone
+      runAfter:
+        - cleanup
+      taskRef:
+        kind: ClusterTask
+        name: git-clone
+      params:
+        - name: url
+          value: 'https://github.com/caitlynn-phillips/ci-cd-final-project.git'
+        - name: revision
+          value: main
+        - name: deleteExisting
+          value: 'true'
+      workspaces:
+        - name: output
+          workspace: output
+
+    - name: flake8
+      runAfter:
+        - git-clone
+      taskRef:
+        kind: Task
+        name: flake8
+      params:
+        - name: args
+          value: '--count --max-complexity=10 --max-line-length=127 --statistics'
+      workspaces:
+        - name: source
+          workspace: output
+
+    - name: nose
+      runAfter:
+        - git-clone
+      taskRef:
+        kind: Task
+        name: nose
+      params:
+        - name: args
+          value: '-v'
+      workspaces:
+        - name: source
+          workspace: output
+
+    - name: buildah
+      runAfter:
+        - flake8
+        - nose
+      taskRef:
+        kind: ClusterTask
+        name: buildah
+      params:
+        - name: IMAGE
+          value: '$(params.build-image)'
+        - name: BUILDER_IMAGE
+          value: >-
+            registry.redhat.io/rhel8/buildah@sha256:aac6629389db17e99894c5bee0da01d4c8065d11d8c6f6e1602f9484290baa70
+        - name: STORAGE_DRIVER
+          value: vfs
+        - name: DOCKERFILE
+          value: ./Dockerfile
+        - name: CONTEXT
+          value: .
+        - name: TLSVERIFY
+          value: 'true'
+        - name: FORMAT
+          value: oci
+      workspaces:
+        - name: source
+          workspace: output
+
+    - name: deploy
+      runAfter:
+        - buildah
+      taskRef:
+        kind: ClusterTask
+        name: openshift-client
+      params:
+        - name: SCRIPT
+          value: |
+            oc create deployment $(params.app-name) --image=$(params.build-image) --dry-run=client -o yaml | oc apply -f -
+            oc expose deployment $(params.app-name) --port=8080 2>/dev/null || true
+            oc expose service $(params.app-name) 2>/dev/null || true
+      workspaces:
+        - name: manifest-dir
+          workspace: output
